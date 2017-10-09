@@ -17,15 +17,16 @@
 
 .NOTES
     FileName:    Get-AppPackgeCleanUp.ps1
-    Authors:     Maurice Daly
-    Contact:     @modaly_it
+    Authors:     Maurice Daly, Austin WongCarter
+    Contact:     @modaly_it, @wongcarter
     Created:     2017-08-11
-    Updated:     2017-09-15
+    Updated:     2017-09-20
     
     Version history:
     1.0.0 - (2017-08-11) Script created (Maurice Daly)
 	1.0.1 - (2017-08-21) Added task sequence names as requested (Maurice Daly)
     1.0.2 - (2017-09-15) Changed logic to speed up processing (Austin WongCarter)
+    1.0.3 - (2017-09-20) Added Dependent Applications, other minor improvements (Austin WongCarter)
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -37,8 +38,8 @@ param (
 	[ValidateNotNullOrEmpty()]
 	[string]$SiteServer,
 	[parameter(Position = 0, HelpMessage = "Generated CSV output option")]
-	[ValidateSet($false, $true)]
-	[string]$ExportCSV = $false
+	[switch]$ExportCSV,
+    [switch]$IncludeAppDependency
 	
 )
 function DeploymentReport ($PackageType) 
@@ -50,7 +51,7 @@ function DeploymentReport ($PackageType)
 	# Run package report
 	if ($PackageType -eq "Packages")
 	{
-        $Packages = Get-CMPackage | Select-Object Name, PackageID
+        $Packages = Get-CMPackage
         $Deployments = Get-CMDeployment
 
 		Foreach ($Package in $Packages)
@@ -71,6 +72,7 @@ function DeploymentReport ($PackageType)
 			$TaskSequenceMatch = New-Object PSObject
 			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Package Name' -Value $Package.Name
 			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Package ID' -Value $Package.PackageID
+			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Last Refresh Time' -Value $Package.LastRefreshTime
 			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Deployment References' -Value $Deployed
 			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Task Sequence References' -Value $TaskSequenceCount
 			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Task Sequences' -Value $TaskSequenceList
@@ -82,9 +84,21 @@ function DeploymentReport ($PackageType)
 	# Run application report
 	if ($PackageType -eq "Applications")
 	{
-        $Applications = Get-CMApplication | Select-Object LocalizedDisplayName, PackageID, IsDeployed, ModelName
+        $Applications = Get-CMApplication
+        $Dependencies = @()
 
-		foreach ($Application in $Applications)
+        ## Build Dependency Table
+        if($IncludeAppDependency)
+        {
+            foreach ($Application in $Applications)
+		    {
+                $Application | Get-CMDeploymentType | where { $_.NumberOfDependedDTs -gt 0} | Get-CMDeploymentTypeDependencyGroup | Get-CMDeploymentTypeDependency|`
+                    % {$Dependencies += New-Object -TypeName PSObject -Property @{'ApplicationID'="$($Application.CI_ID)";'DependencyAppID'=$(($_ | Get-CMApplication).CI_ID);'ApplicationDisplayName'="$($Application.LocalizedDisplayName)"}}
+            }
+            $Dependencies = $Dependencies | select * -Unique
+		}
+        
+        foreach ($Application in $Applications)
 		{
 			$TaskSequenceCount = 0
 			$TaskSequenceList = $null
@@ -97,16 +111,25 @@ function DeploymentReport ($PackageType)
 					$TaskSequenceList = $TaskSequenceList + $TaskSequence.Name + ";"
 				}
 			}
+            
+            $DepCount = 0
+            $DependentAppNames = ""
+            $Dependencies | where {$_.DependencyAppID -eq $Application.CI_ID} | % {$DependentAppNames += "$($_.ApplicationDisplayName);"; $DepCount++}
 
-			$TaskSequenceMatch = New-Object PSObject
+            $TaskSequenceMatch = New-Object PSObject
 			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Application Name' -Value $Application.LocalizedDisplayName
-			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Package ID' -Value $Application.PackageID
+			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Application ID' -Value $Application.CI_ID
 			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Application Deployed' -Value $Application.IsDeployed
 			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Task Sequence References' -Value $TaskSequenceCount
 			$TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Task Sequences' -Value $TaskSequenceList
+            if($IncludeAppDependency)
+            {
+                $TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Dependent Application Count' -Value $DepCount
+                $TaskSequenceMatch | Add-Member -type NoteProperty -Name 'Dependent Applications' -Value $DependentAppNames
+            }
 			$PackageReport += $TaskSequenceMatch
 		}
-		Return $PackageReport
+        Return $PackageReport
 	}
 }
 
